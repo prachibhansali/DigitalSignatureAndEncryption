@@ -29,7 +29,8 @@ def main():
 	while True:
 		data, address = sock.recvfrom(1024);
 		if data=='GREETING':
-			active_clients.append(address)
+			if address not in active_clients:
+				active_clients.append(address)
 		else:
 			format_message = '<From ' + str(address[0]) + ':' + str(address[1]) + '>: ' + data
 			# Broadcast message to all active clients
