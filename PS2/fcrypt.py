@@ -13,26 +13,12 @@ import binascii
 import struct
 import os
 
+# AES block size is 16 bytes
 AES_BLOCK_SIZE = 16
-AES_KEY_SIZE = 16
+# Use AES-256 encryption
+AES_KEY_SIZE = 32
+# Size of initialization vector is 16 bytes
 AES_IV_SIZE = 16
-SALT = 16
-
-def pad(message):
-	if len(message) % AES_BLOCK_SIZE == 0:
-		return message
-	padding_needed = AES_BLOCK_SIZE - (len(message)%AES_BLOCK_SIZE)
-	#PKCS#7
-	message = message+chr(padding_needed)*padding_needed
-	return message
-
-def unpad(message):
-	val = int(binascii.hexlify(message[-1]), 16)
-	if(val > 16):
-		print 'Message is either corrupted or does not have padding'
-		return message
-	orig_length = len(message) - val
-	return message[:orig_length]
 
 def sign(private_key, digest):
 	signer = private_key.signer(
@@ -46,7 +32,7 @@ def sign(private_key, digest):
 	signature = signer.finalize()
 	return signature
 
-def verify(public_key, signature, message):
+def verify_signature(public_key, signature, message):
 	verifier = public_key.verifier(
 		signature,
 		padding.PSS(
@@ -57,7 +43,6 @@ def verify(public_key, signature, message):
 		)
 	verifier.update(message)
 	verifier.verify()
-
 
 def rsa_encrypt(public_key, aes_key):
 	aes_key_encrypted = public_key.encrypt(
@@ -84,53 +69,70 @@ def generate_hmac(key, message):
 	h.update(message)
 	return h.finalize()
 
-def encrypt_and_sign(destination_public_key, sender_private_key, input_plaintext, ciphertext_file):
+def encrypt_and_sign(destination_public_key, sender_private_key, plaintext, ciphertext_file):
+	print 'starting encryption'
+	out = open(ciphertext_file, 'wb+')
 	try:
 		key = os.urandom(AES_KEY_SIZE)
 		iv = os.urandom(AES_IV_SIZE)
 
 		# Generate an HMAC of plaintext and sign it using sender's private key.
-		digest = generate_hmac(key, input_plaintext)
+		digest = generate_hmac(key, plaintext)
 		signed_digest = sign(sender_private_key, digest)
 
-		plaintext = pad(input_plaintext)
-		
-		cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+		print 'encrypting...'
+		# Encrypt signed digest and plaintext using AES-CTR mode.
+		cipher = Cipher(algorithms.AES(key), modes.CTR(iv), backend=default_backend())
 		encryptor = cipher.encryptor()
 		ciphertext = encryptor.update(signed_digest) + encryptor.update(plaintext)  + encryptor.finalize()
 
+		# Encrypt the generated AES key using RSA
 		encrypted_key = rsa_encrypt(destination_public_key, key)
-		output = encrypted_key + iv + ciphertext
-		out = open(ciphertext_file, 'wb+')
-		out.write(output)
 
+		print 'writing encrypted text to file...'
+		# Write ciphertext to output file
+		output = encrypted_key + iv + ciphertext
+		out.write(output)
+		print 'successfully stored the ciphertext at location: ', ciphertext_file
 	except Exception, e:
 		print 'Error while encrypting the message %s' % e 
 		exit()
 
 
-def decrypt_and_verify(destination_private_key, sender_public_key, ciphertext, output_plaintext):
+def decrypt_and_verify(destination_private_key, sender_public_key, ciphertext, output_plaintext_file):
+	print 'starting decryption'
+	out = open(output_plaintext_file, 'w+')
 	try:
-		key_length = (sender_public_key.key_size)/8
+		destination_key_length = (destination_private_key.key_size)/8
 
-		encrypted_key = ciphertext[:key_length]
-		iv = ciphertext[key_length:key_length+AES_IV_SIZE]
-		cipher_text = ciphertext[key_length+AES_IV_SIZE:]
+		# Ciphertext format: encrypted_key + iv + ciphertext
+		encrypted_key = ciphertext[:destination_key_length]
+		iv = ciphertext[destination_key_length:destination_key_length+AES_IV_SIZE]
+		cipher_text = ciphertext[destination_key_length+AES_IV_SIZE:]
 
+		# Fetch AES key by decrypting using RSA
 		aes_key = rsa_decrypt(destination_private_key, encrypted_key)
-		cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=default_backend())
+
+		print 'decrypting...'
+		# Decrypt ciphertext using AES to obtain digest and plaintext
+		cipher = Cipher(algorithms.AES(aes_key), modes.CTR(iv), backend=default_backend())
 		decryptor = cipher.decryptor()
 		decrypted_text = decryptor.update(cipher_text) + decryptor.finalize()
 
-		signed_digest = decrypted_text[:key_length]
-		decrypted_text = decrypted_text[key_length:]
-		decrypted_text = unpad(decrypted_text)
+		sender_key_length = (sender_public_key.key_size)/8
+		signed_digest = decrypted_text[:sender_key_length]
+		decrypted_text = decrypted_text[sender_key_length:]
+
+		# Generate an HMAC of decrypted text and verify it using sender's public key.
+		# Throw an exception if verification fails.
 		digest = generate_hmac(aes_key, decrypted_text)
+		verify_signature(sender_public_key, signed_digest, digest)
 
-		verify(sender_public_key, signed_digest, digest)
-		out = open(output_plaintext, 'w+')
+		print 'writing decrypted text to file...'
+		# Write decrypted text to output file.
 		out.write(decrypted_text)
-
+		print 'successfully stored decrypted text at location: ', output_plaintext_file
+		
 	except InvalidSignature, e:
 		print 'Invalid signature %s' % e
 		exit()
@@ -179,12 +181,14 @@ def main(argv):
 			return
 		for opt, _ in opts:
 			if opt == '-e':
+				# Perform encryption
 				destination_public_key = read_public_key(args[0])
 				sender_private_key = read_private_key(args[1])
 				input_plaintext = read_file_contents(args[2])
 				ciphertext_file = args[3]
 				encrypt_and_sign(destination_public_key, sender_private_key, input_plaintext, ciphertext_file)
 			elif opt == '-d':
+				# Perform decryption
 				destination_private_key = read_private_key(args[0])
 				sender_public_key = read_public_key(args[1])
 				ciphertext = read_file_contents(args[2])
