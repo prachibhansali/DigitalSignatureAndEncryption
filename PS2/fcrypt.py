@@ -28,16 +28,19 @@ def pad(message):
 
 def unpad(message):
 	val = int(binascii.hexlify(message[-1]), 16)
+	if(val > 16):
+		print 'Message is either corrupted or does not have padding'
+		return message
 	orig_length = len(message) - val
 	return message[:orig_length]
 
 def sign(private_key, digest):
 	signer = private_key.signer(
 		padding.PSS(
-			mgf=padding.MGF1(hashes.SHA384()),
+			mgf=padding.MGF1(hashes.SHA256()),
 			salt_length=padding.PSS.MAX_LENGTH
 			),
-		hashes.SHA384()
+		hashes.SHA256()
 		)
 	signer.update(digest)
 	signature = signer.finalize()
@@ -47,26 +50,21 @@ def verify(public_key, signature, message):
 	verifier = public_key.verifier(
 		signature,
 		padding.PSS(
-			mgf=padding.MGF1(hashes.SHA384()),
+			mgf=padding.MGF1(hashes.SHA256()),
 			salt_length=padding.PSS.MAX_LENGTH
 			),
-		hashes.SHA384()
+		hashes.SHA256()
 		)
 	verifier.update(message)
-	try:
-		verifier.verify()
-		return True
-	except InvalidSignature, e:
-		print 'Invalid signature due to exception %s' % e 
-		return False
+	verifier.verify()
 
 
 def rsa_encrypt(public_key, aes_key):
 	aes_key_encrypted = public_key.encrypt(
 		aes_key,
 		padding.OAEP(
-		mgf=padding.MGF1(algorithm=hashes.SHA384()),
-		algorithm=hashes.SHA384(),
+		mgf=padding.MGF1(algorithm=hashes.SHA256()),
+		algorithm=hashes.SHA256(),
 		label=None)
 		)
 	return aes_key_encrypted
@@ -75,57 +73,70 @@ def rsa_decrypt(private_key, aes_key_encrypted):
 	aes_key = private_key.decrypt(
 		aes_key_encrypted,
 		padding.OAEP(
-		mgf=padding.MGF1(algorithm=hashes.SHA384()),
-		algorithm=hashes.SHA384(),
+		mgf=padding.MGF1(algorithm=hashes.SHA256()),
+		algorithm=hashes.SHA256(),
 		label=None)
 		)
 	return aes_key
 
 def generate_hmac(key, message):
-	h = hmac.HMAC(key, hashes.SHA384(), backend=default_backend())
+	h = hmac.HMAC(key, hashes.SHA256(), backend=default_backend())
 	h.update(message)
 	return h.finalize()
 
 def encrypt_and_sign(destination_public_key, sender_private_key, input_plaintext, ciphertext_file):
-	key = os.urandom(AES_KEY_SIZE)
-	iv = os.urandom(AES_IV_SIZE)
+	try:
+		key = os.urandom(AES_KEY_SIZE)
+		iv = os.urandom(AES_IV_SIZE)
 
-	digest = generate_hmac(key, input_plaintext)
-	signed_digest = sign(sender_private_key, digest)
+		# Generate an HMAC of plaintext and sign it using sender's private key.
+		digest = generate_hmac(key, input_plaintext)
+		signed_digest = sign(sender_private_key, digest)
 
-	plaintext = pad(input_plaintext)
-	
-	cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
-	encryptor = cipher.encryptor()
-	ciphertext = encryptor.update(plaintext) + encryptor.finalize()
+		plaintext = pad(input_plaintext)
+		
+		cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+		encryptor = cipher.encryptor()
+		ciphertext = encryptor.update(signed_digest) + encryptor.update(plaintext)  + encryptor.finalize()
 
-	encrypted_key = rsa_encrypt(destination_public_key, key)
-	output = signed_digest + encrypted_key + iv + ciphertext
-	out = open(ciphertext_file, 'wb+')
-	out.write(output)
-	return output
+		encrypted_key = rsa_encrypt(destination_public_key, key)
+		output = encrypted_key + iv + ciphertext
+		out = open(ciphertext_file, 'wb+')
+		out.write(output)
+
+	except Exception, e:
+		print 'Error while encrypting the message %s' % e 
+		exit()
 
 
 def decrypt_and_verify(destination_private_key, sender_public_key, ciphertext, output_plaintext):
-	key_length = (sender_public_key.key_size)/8
-	signed_digest = ciphertext[:key_length]
-	remainder = ciphertext[key_length:]
-	encrypted_key = remainder[:key_length]
-	remainder = remainder[key_length:]
-	iv = remainder[:AES_IV_SIZE]
-	cipher_text = remainder[AES_IV_SIZE:]
+	try:
+		key_length = (sender_public_key.key_size)/8
 
-	aes_key = rsa_decrypt(destination_private_key, encrypted_key)
-	cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=default_backend())
-	decryptor = cipher.decryptor()
-	decrypted_text = decryptor.update(cipher_text) + decryptor.finalize()
+		encrypted_key = ciphertext[:key_length]
+		iv = ciphertext[key_length:key_length+AES_IV_SIZE]
+		cipher_text = ciphertext[key_length+AES_IV_SIZE:]
 
-	decrypted_text = unpad(decrypted_text)
-	digest = generate_hmac(aes_key, decrypted_text)
+		aes_key = rsa_decrypt(destination_private_key, encrypted_key)
+		cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv), backend=default_backend())
+		decryptor = cipher.decryptor()
+		decrypted_text = decryptor.update(cipher_text) + decryptor.finalize()
 
-	if verify(sender_public_key, signed_digest, digest):
+		signed_digest = decrypted_text[:key_length]
+		decrypted_text = decrypted_text[key_length:]
+		decrypted_text = unpad(decrypted_text)
+		digest = generate_hmac(aes_key, decrypted_text)
+
+		verify(sender_public_key, signed_digest, digest)
 		out = open(output_plaintext, 'w+')
 		out.write(decrypted_text)
+
+	except InvalidSignature, e:
+		print 'Invalid signature %s' % e
+		exit()
+	except Exception, e:
+		print 'Error while decrypting the message %s' % e 
+		exit()
 
 def read_private_key(filename):
 	try:
@@ -181,7 +192,6 @@ def main(argv):
 				decrypt_and_verify(destination_private_key, sender_public_key, ciphertext, output_plaintext)
 			else:
 			 	return
-		
 	except getopt.GetoptError, e:
 		print 'Error in fetching arguments %s' % e
 		return
