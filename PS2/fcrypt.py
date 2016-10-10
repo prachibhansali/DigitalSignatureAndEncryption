@@ -17,8 +17,8 @@ import os
 AES_BLOCK_SIZE = 16
 # Use AES-256 encryption
 AES_KEY_SIZE = 32
-# Size of initialization vector is 16 bytes
-AES_IV_SIZE = 16
+# Size of initialization vector is 16 bytes, like the AES block size
+AES_IV_SIZE = AES_BLOCK_SIZE
 
 def sign(private_key, digest):
 	signer = private_key.signer(
@@ -89,14 +89,16 @@ def encrypt_and_sign(destination_public_key, sender_private_key, plaintext, ciph
 		# Encrypt the generated AES key using RSA
 		encrypted_key = rsa_encrypt(destination_public_key, key)
 
-		print 'writing encrypted text to file...'
 		# Write ciphertext to output file
+		print 'writing encrypted text to file...'
 		output = encrypted_key + iv + ciphertext
 		out.write(output)
 		print 'successfully stored the ciphertext at location: ', ciphertext_file
+		out.close()
+
 	except Exception, e:
-		print 'Error while encrypting the message %s' % e 
-		exit()
+		print 'Error while encrypting the message %s' % e
+		out.close()
 
 
 def decrypt_and_verify(destination_private_key, sender_public_key, ciphertext, output_plaintext_file):
@@ -132,15 +134,17 @@ def decrypt_and_verify(destination_private_key, sender_public_key, ciphertext, o
 		# Write decrypted text to output file.
 		out.write(decrypted_text)
 		print 'successfully stored decrypted text at location: ', output_plaintext_file
-		
+		out.close()
+
 	except InvalidSignature, e:
-		print 'Invalid signature %s' % e
-		exit()
+		raise InvalidSignature('Invalid signature')
 	except Exception, e:
-		print 'Error while decrypting the message %s' % e 
-		exit()
+		print 'Error while decrypting the message: %s' % e 
+		out.close()
 
 def read_private_key(filename):
+	if filename.endswith(".der") is False:
+		raise IOError('File must be der format only.')
 	try:
 		with open(filename, "rb") as key_file:
 			key = serialization.load_der_private_key(
@@ -149,24 +153,28 @@ def read_private_key(filename):
 				backend=default_backend())	    
 		return key
 	except Exception, e:
-		print 'Error in reading key: %s' % e
+		print 'Error in reading private key: %s' % e
 		exit()
 	
 def read_public_key(filename):
+	if filename.endswith(".der") is False:
+		raise IOError('File must be der format only.') 
 	try:
 		with open(filename, "rb") as key_file:
 			key = serialization.load_der_public_key(
 	      		key_file.read(),
 	      		backend=default_backend())	    
 			return key
+
 	except Exception, e:
-		print 'Error in reading key: %s' % e
+		print 'Error in reading public key: %s' % e
 		exit()
 	
 def read_file_contents(filename):
 	try:
 		with open(filename, 'rb') as f:
 			return f.read()
+
 	except Exception, e:
 		print 'Error in reading file: %s' % e
 		exit()
@@ -192,13 +200,14 @@ def main(argv):
 				destination_private_key = read_private_key(args[0])
 				sender_public_key = read_public_key(args[1])
 				ciphertext = read_file_contents(args[2])
-				output_plaintext = args[3]
-				decrypt_and_verify(destination_private_key, sender_public_key, ciphertext, output_plaintext)
+				output_plaintext_file = args[3]
+				decrypt_and_verify(destination_private_key, sender_public_key, ciphertext, output_plaintext_file)
 			else:
 			 	return
 	except getopt.GetoptError, e:
 		print 'Error in fetching arguments %s' % e
-		return
+	except Exception, e:
+		print "Exiting due to exception: %s" % e
 
 if __name__ == "__main__":
 	main(sys.argv[1:])
